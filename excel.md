@@ -35,6 +35,49 @@ execl(fullpath, fullpath, "0", dur_str, count_str, start_str, (void *) 0);
 - 测量在指定时间内完成的`execl()`调用次数
 - 结果以"lps"（loops per second）为单位
 
+## execl 测试流程图
+下面这张图只保留 `UnixBench execl` 测试里最关键的装载路径，重点展示 `execl()` 之后内核、动态加载器和共享库参与的几个阶段。
+
+```mermaid
+flowchart TD
+    subgraph User_Space_Initial [用户态：初始启动]
+        A[UnixBench Runner<br/>启动 ./pgms/execl 30] --> B["execl.c: main() 首次启动<br/>记录 start_time / 初始化计数器"]
+    end
+
+    subgraph Kernel_Space [内核态：进程替换]
+        B --> C["调用 execl(path, ..., duration, iter, start_time)"] --> D["sys_execve() 入口<br/>清除旧进程映像"]
+        D --> E["读取 ELF Headers<br/>(含 big.c 产生的大量段数据)"]
+        E --> F{检查 PT_INTERP}
+        F -- 动态链接 --> G["加载动态连接器<br/>(ld-linux.so)"]
+        F -- 静态链接 --> I["建立新程序栈/堆栈"]
+    end
+
+    %% B --> C
+
+    subgraph Loader_Phase [用户态：动态链接阶段]
+        G --> H["映射共享库 (libc等)<br/>符号解析与重定位"]
+        H --> I
+    end
+
+    subgraph User_Space_New [用户态：新程序执行]
+        I --> J["进入新映像的 _start -> main()"]
+        J --> K["从 argv 获取状态<br/>(iter+1, start_time, duration)"]
+        K --> L{测试时间到达?}
+        L -- 否 --> C
+        L -- 是 --> M["输出结果 (lps)<br/>进程退出"]
+    end
+
+    %% 样式美化
+    style User_Space_Initial fill:#f9f,stroke:#333,stroke-width:2px
+    style User_Space_New fill:#bbf,stroke:#333,stroke-width:2px
+    style Kernel_Space fill:#dfd,stroke:#333,stroke-width:2px
+    style Loader_Phase fill:#fff4dd,stroke:#333,stroke-dasharray: 5 5
+```
+
+- `execl()` 成功后不会返回到旧代码路径，当前进程会直接变成新装入的 `execl` 程序映像。
+- 如果 `execl` 可执行文件是动态链接的，内核会根据 `PT_INTERP` 把控制权先交给动态加载器，再由它装入 `libc` 等依赖库并完成重定位。
+- `big.c` 被编译进测试程序，主要作用是增大二进制体积，让这里的程序装载更接近真实负载，而不是只测一个极小空程序。
+
 ## 测试在UnixBench中的配置
 从Run文件可以看到：
 
