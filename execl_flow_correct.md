@@ -618,6 +618,13 @@ flowchart TD
 
 ### 8.1 汇总表格
 
+| 测试项       | 场景/编译方式 | 主要瓶颈点                   | 热点函数        | 热点锁                   | 备注                                              |
+| :----------- | :------------ | :--------------------------- | :-------------- | :----------------------- | :------------------------------------------------ |
+| **execl**    | 动态编        | 加载共享库、符号解析和重定位 | `down_write`    | `&mapping->i_mmap_rwsem` | 涉及频繁内存操作                                  |
+| **execl**    | 静态编译      | 页错误处理 (Page Fault)      | `do_page_fault` | `folio_wait_table`       | 消除动态链接瓶颈后，分数提升 **~8倍**             |
+| **spawn**    | 动态编译      | 进程等待与资源回收           | `do_wait`       | `tasklist_lock`          | 大量 `fork` 后父进程等待子进程导致的全局锁竞争    |
+| **shell1/8** | 动态编译      | 文件映射与地址空间操作       | `down_write`    | `&mapping->i_mmap_rwsem` | 热点函数、热点锁与 `execl` 动态链接场景高度一致。 |
+
 | 测试项 | 编译方式 | 主要瓶颈 | 热点函数 | 热点锁 | 备注 |
 |---|---|---|---|---|---|
 | **execl** | 动态链接（默认） | 动态链接阶段：`ld.so` 加载 `libc` 等共享库时，多进程并发访问同一 inode 的内存映射 | `down_write` | `&mapping->i_mmap_rwsem` | 40容器并发时锁竞争剧烈，分数断崖式下跌 |
@@ -626,6 +633,55 @@ flowchart TD
 | **shell1** | 动态链接 | 动态链接阶段：`/bin/sh` 及 `sort`/`grep` 等工具加载 `libc` 时并发竞争 inode 映射锁 | `down_write` | `&mapping->i_mmap_rwsem` | 与 execl 动态链接瓶颈同源 |
 | **shell8** | 动态链接 | 同 shell1，但 8 路并发使锁竞争强度 ×8 | `down_write` | `&mapping->i_mmap_rwsem` | 每轮启动 8×`tst.sh`，锁热点更突出 |
 
+
+`down_write`
+```C
+// kernel/locking/rwsem.c
+/*
+ * lock for writing
+ */
+void __sched down_write(struct rw_semaphore *sem)
+{
+	might_sleep();
+	rwsem_acquire(&sem->dep_map, 0, 0, _RET_IP_);
+	LOCK_CONTENDED(sem, __down_write_trylock, __down_write);
+}
+EXPORT_SYMBOL(down_write);
+
+// include/linux/lockdep.h
+#define LOCK_CONTENDED(_lock, try, lock) \
+	lock(_lock)
+
+// 所以
+// LOCK_CONTENDED(sem, __down_write_trylock, __down_write);等价于
+// __down_write(sem);
+
+
+// kernel/locking/rwsem.c
+
+/*
+ * lock for writing
+ */
+static __always_inline int __down_write_common(struct rw_semaphore *sem, int state)
+{
+	int ret = 0;
+
+	preempt_disable();
+	if (unlikely(!rwsem_write_trylock(sem))) {
+		if (IS_ERR(rwsem_down_write_slowpath(sem, state)))
+			ret = -EINTR;
+	}
+	preempt_enable();
+	return ret;
+}
+
+static __always_inline void __down_write(struct rw_semaphore *sem)
+{
+	__down_write_common(sem, TASK_UNINTERRUPTIBLE);
+}
+
+```
+所以`down_write -> __down_write_common -> rwsem_down_write_slowpath`，与火焰图抓取到的调用栈对应。
 ---
 
 ### 8.2 热点锁说明
