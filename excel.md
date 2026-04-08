@@ -45,7 +45,7 @@ flowchart TD
     end
 
     subgraph Kernel_Space [内核态：进程替换]
-        B --> C["调用 execl(path, ..., duration, iter, start_time)"] --> D["sys_execve() 入口<br/>清除旧进程映像"]
+        B --> C["调用 execl(path, ..., duration, iter, start_time)"] --> D["sys_execve() 入口<br/>alloc_bprm() 分配 linux_binprm<br/>（旧进程映像此时仍存在）"]
         D --> E["读取 ELF Headers<br/>(含 big.c 产生的大量段数据)"]
         E --> F{检查 PT_INTERP}
         F -- 动态链接 --> G["加载动态连接器<br/>(ld-linux.so)"]

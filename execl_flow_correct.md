@@ -69,15 +69,15 @@ flowchart TD
     end
 
     subgraph KS7 [内核态 → 用户态：返回]
-        W["start_thread(regs, elf_entry, bprm->p)<br/>修改 pt_regs->pc = elf_entry<br/>修改 pt_regs->sp = 新栈顶<br/>ARM64 执行 eret 回 EL0"]
+        W["start_thread(regs, elf_entry, bprm->p)<br/>修改 pt_regs->pc = elf_entry<br/>  动态链接: elf_entry = interp_load_addr + ld.so e_entry<br/>  静态链接: elf_entry = elf_ex->e_entry + load_bias<br/>修改 pt_regs->sp = 新栈顶<br/>ARM64 执行 eret 回 EL0"]
         V --> W
     end
 
-    subgraph LD [用户态：动态链接阶段（ld-linux.so 执行）]
+    subgraph LD [用户态：动态链接阶段（ld-linux.so 执行，仅动态链接）]
         X["ld-linux.so _start 开始执行<br/>读取 auxv 获取主程序 PT_PHDR/AT_BASE"]
         Y["mmap() 映射 libc.so 等依赖库<br/>（通过 open()/mmap() 系统调用）"]
         Z["符号解析与重定位<br/>填写 GOT/PLT 表项"]
-        W --> X --> Y --> Z
+        W -- 动态链接: elf_entry → ld.so _start --> X --> Y --> Z
     end
 
     subgraph US3 [用户态：新程序执行]
@@ -87,7 +87,9 @@ flowchart TD
         AD{时间到达?}
         AE["fprintf(stderr, 'COUNT|%lu|1|lps\\n', iter)<br/>exit(0)"]
         AF["execl(fullpath, fullpath, '0',<br/>dur_str, count_str, start_str, NULL)<br/>→ 回到 glibc execl()，重新进入内核"]
-        Z --> AA --> AB --> AC --> AD
+        Z --> AA
+        W -- 静态链接: elf_entry → 主程序 _start --> AA
+        AA --> AB --> AC --> AD
         AD -- 是 --> AE
         AD -- 否 --> AF --> C
     end
@@ -428,6 +430,7 @@ int main(argc, argv)
 | PT_INTERP 检查与 ld.so 打开 | 位于旧映像清除之后 | 位于旧映像清除**之前**（可回滚阶段） |
 | ld.so 映射时机 | 标注为"用户态" | **内核态** `load_elf_interp()` 完成，返回用户态时 ld.so 已在地址空间中 |
 | iter 获取 | 写作"从 argv 获取 iter+1" | argv[3] 取到当前 iter，`++iter` 发生在调用 execl **之前** |
+| **静态链接入口点（本次修正）** | 建立新程序栈后**所有路径**（含静态链接）都走 `ld-linux.so _start` | 静态链接：`elf_entry = elf_ex->e_entry + load_bias`（主程序入口），`eret` 后**直接**跳主程序 `_start`，**完全不经过 ld.so** |
 
 ---
 
@@ -460,24 +463,28 @@ flowchart TD
         B --> C["调用 glibc execl(path, ..., duration, iter, start_time)"]
         C --> D["sys_execve() 入口<br/>alloc_bprm() / copy_strings()"]
         D --> E["读取 ELF Headers<br/>(含 big.c 产生的大量段数据)"]
-        E --> F{检查 PT_INTERP}
-        F -- 动态链接 --> G["open_exec(ld-linux.so)<br/>读取解释器 ELF Header<br/>（旧映像仍存在，可回滚）"]
-        F -- 静态链接 --> H
+        E --> F{动态链接?}
+        F -- 是 --> G["open_exec(ld-linux.so)<br/>读取解释器 ELF Header<br/>（旧映像仍存在，可回滚）"]
+        F -- 否 --> H
         G --> H["★ begin_new_exec()<br/>释放旧映像 / 重置信号 / 提交凭证<br/>← 真正的不可逆点"]
         H --> I["elf_map() 映射 PT_LOAD 段<br/>set_brk() 分配 BSS 段"]
         I --> J{动态链接?}
-        J -- 否 --> L["start_thread()<br/>建立新程序栈/入口<br/>eret 返回 EL0"]
-        J -- 是 --> K["load_elf_interp()<br/>内核映射 ld-linux.so 各段<br/>elf_entry → ld.so _start"]
         
-        K --> L
+
+        J -- 是 --> K["load_elf_interp()<br/>内核映射 ld-linux.so 各段<br/>elf_entry → ld.so _start"]
+        J -- 否 --> L2["eret 返回 EL0"]
+
+        
+        K --> L2["eret 返回 EL0"]
     end
 
-    subgraph Loader_Phase [用户态：动态链接阶段]
-        L --> M["ld-linux.so _start 执行<br/>mmap() 映射 libc 等共享库<br/>符号解析与重定位（GOT/PLT）"]
+    subgraph Loader_Phase ["★ 用户态：动态链接阶段（仅动态链接）"]
+        L2 -- 动态链接: elf_entry → ld.so _start --> M["ld-linux.so _start 执行<br/>mmap() 映射 libc 等共享库<br/>符号解析与重定位（GOT/PLT）<br/>→ 跳转到主程序 _start"]
     end
 
     subgraph User_Space_New [用户态：新程序执行]
         M --> N["进入新映像的 _start → main()"]
+        L2 -- 静态链接: elf_entry → 主程序 _start --> N
         N --> O["从 argv 恢复状态<br/>(duration / iter / start_time)"]
         O --> P["++iter，检查测试时间"]
         P --> Q{测试时间到达?}
@@ -493,8 +500,9 @@ flowchart TD
 ```
 
 - `execl()` 成功后不会返回到旧代码路径，当前进程直接变成新装入的程序映像。
-- **关键修正**：`PT_INTERP` 检查与 `ld-linux.so` Header 读取发生在旧映像清除（`begin_new_exec()`）**之前**，此阶段失败仍可安全回滚；`begin_new_exec()` 才是真正的不可逆点。
+- **关键修正（原始版）**：`PT_INTERP` 检查与 `ld-linux.so` Header 读取发生在旧映像清除（`begin_new_exec()`）**之前**，此阶段失败仍可安全回滚；`begin_new_exec()` 才是真正的不可逆点。
 - `ld-linux.so` 的各 `PT_LOAD` 段由内核 `load_elf_interp()` 在**内核态**完成映射，控制权交给它时映射已存在；符号解析和重定位才是用户态行为。
+- **本次补充修正**：静态链接时，`load_elf_binary()` 不调用 `load_elf_interp()`，`elf_entry = elf_ex->e_entry + load_bias`（主程序自身入口），`start_thread()` / `eret` 后 CPU **直接跳转到主程序 `_start`**，**完全不经过 ld-linux.so**。原流程图中静态链接路径汇入 `ld-linux.so _start` 是错误的。
 - `big.c` 被编译进测试程序，增大二进制体积，让程序装载更接近真实负载。
 
 ---
