@@ -478,23 +478,37 @@ flowchart TD
         K --> L2["eret 返回 EL0"]
     end
 
-    subgraph Loader_Phase ["★ 用户态：动态链接阶段（仅动态链接）"]
-        L2 -- 动态链接: elf_entry → ld.so _start --> M["ld-linux.so _start 执行<br/>mmap() 映射 libc 等共享库<br/>符号解析与重定位（GOT/PLT）<br/>→ 跳转到主程序 _start"]
+    subgraph BranchLevel [" "]
+        direction LR
+        subgraph User_Space_New [用户态：新程序执行]
+            direction TB
+            N["进入新映像的 _start → main()"]
+            O["从 argv 恢复状态<br/>(duration / iter / start_time)"]
+            P["++iter，检查测试时间"]
+            Q{测试时间到达?}
+            R["输出结果 COUNT|iter|1|lps<br/>进程退出"]
+            N --> O --> P --> Q
+            Q -- 是 --> R
+        end
+        %% L2 分叉：先定义静态→左(User_Space_New)，后定义动态→右(Loader_Phase)
+        L2 -- 静态链接: elf_entry → 主程序 _start --> N
+        subgraph Loader_Phase ["★ 用户态：动态链接阶段（仅动态链接）"]
+            direction TB
+            M["ld-linux.so _start 执行<br/>mmap() 映射 libc 等共享库<br/>符号解析与重定位（GOT/PLT）<br/>→ 跳转到主程序 _start"]
+        end
+        L2 -- 动态链接: elf_entry → ld.so _start --> M
     end
 
-    subgraph User_Space_New [用户态：新程序执行]
-        M --> N["进入新映像的 _start → main()"]
-        L2 -- 静态链接: elf_entry → 主程序 _start --> N
-        N --> O["从 argv 恢复状态<br/>(duration / iter / start_time)"]
-        O --> P["++iter，检查测试时间"]
-        P --> Q{测试时间到达?}
-        Q -- 否 --> C
-        Q -- 是 --> R["输出结果 COUNT|iter|1|lps<br/>进程退出"]
-    end
+    %% 跨 BranchLevel 内部的汇合边：动态路径 M → N
+    M --> N
+    %% 循环回边（必须在子图外定义，否则 direction LR 无法正确处理跨域边）
+    Q -- 否 --> C
+
 
     %% 样式
     style User_Space_Initial fill:#f9f,stroke:#333,stroke-width:2px
     style Kernel_Space       fill:#dfd,stroke:#333,stroke-width:2px
+    style BranchLevel        fill:none,stroke:#aaa,stroke-dasharray: 4 4
     style Loader_Phase       fill:#fff4dd,stroke:#333,stroke-dasharray: 5 5
     style User_Space_New     fill:#bbf,stroke:#333,stroke-width:2px
 ```
