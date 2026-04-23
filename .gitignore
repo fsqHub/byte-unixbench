@@ -2,3 +2,8 @@ UnixBench/pgms
 UnixBench/results
 UnixBench/tmp
 .marscode/deviceInfo.json
+byte-unixbench.code-workspace
+.vscode/c_cpp_properties.json
+.vscode/launch.json
+.vscode/settings.json
+.codex
